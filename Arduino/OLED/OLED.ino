@@ -60,11 +60,114 @@ float last_sipm_voltage                       = 0;
 float temperatureC;
 
 byte waiting_for_interupt                     = 0;
-byte SLAVE;
-byte MASTER;
 byte keep_pulse                               = 0;
 
+// for setting up more than detector in concert
+byte SLAVE; 
+byte MASTER;
+
+// Pumps
+String pumpAddress = "pump";
+const int numPumps = 6;
+double timeToPump;
+int pumpInterval;
+int speedset[2] {0, 255};
+evolver_si pump("pump", "_!", numPumps+1);
+String pumpSavedInputs[6];
+boolean pump_new_input = false;
+int pumpOutputPin[] = {6, 7, 8, 9, 10, 12};
+byte ipp = 0;
+
+class Pump {
+  boolean pumpRunning = false;
+  int addr; int timeToPump = 0;
+  int pumpInterval = 0;
+  unsigned long previousMillis = 0;
+  boolean off = false;
+
+  public:
+    Pump() {}
+    void init(int addrInit) {
+      addr = addrInit;
+      if (pumpOutputPin[addr] != 12) {
+        analogWrite(pumpOutputPin[addr], speedset[0]);
+      }
+      else {
+        digitalWrite(12, LOW);  
+      }
+    }
+
+    void update() {  
+      unsigned long currentMillis = millis();
+      if (currentMillis - previousMillis > timeToPump && pumpRunning) {
+        if (pumpOutputPin[addr] != 12) {
+          analogWrite(pumpOutputPin[addr], speedset[0]);
+        }
+        else {
+          digitalWrite(12, LOW);  
+        }
+        pumpRunning = false; 
+      }
+
+      if (currentMillis - previousMillis > pumpInterval && !pumpRunning && pumpInterval != 0) {
+        previousMillis = currentMillis;
+        pumpRunning = true;
+        if (pumpOutputPin[addr] != 12) {
+          analogWrite(pumpOutputPin[addr], speedset[1]);
+        }
+        else {
+          digitalWrite(12, HIGH);  
+        }
+      }
+    }
+
+    void setPump(float timeToPumpSet, int pumpIntervalSet) {
+      timeToPump = timeToPumpSet * 1000;
+      pumpInterval = pumpIntervalSet * 1000;
+
+      previousMillis = millis();
+      pumpRunning = true;
+      if (timeToPump > 0) {
+        if (pumpOutputPin[addr] != 12) {
+          analogWrite(pumpOutputPin[addr], speedset[1]);
+        }
+        else {
+          digitalWrite(12, HIGH);  
+        }
+      }
+    }
+
+    void turnOff() {
+      if (pumpOutputPin[addr] != 12) {
+        analogWrite(pumpOutputPin[addr], speedset[0]);
+      }
+      else {
+        digitalWrite(12, LOW);  
+      }
+      timeToPump = 0;
+      pumpInterval = 0;
+    }
+
+    bool isNewChemostat(float newTimeToPump, int newPumpInterval) {
+      newTimeToPump = newTimeToPump * 1000;
+      newPumpInterval = newPumpInterval * 1000;
+
+      return (newTimeToPump == timeToPump && newPumpInterval == pumpInterval);
+    }
+
+    bool isRunning() {
+      return pumpRunning;
+    }
+};
+
+Pump pumps[numPumps];
+
 void setup() {
+  // Initialize pumps
+  for (int i = 0; i < numPumps; i++) {    
+    pumps[i].init(i);
+  }
+
   analogReference (EXTERNAL);
   ADCSRA &= ~(bit (ADPS0) | bit (ADPS1) | bit (ADPS2));  // clear prescaler bits
   ADCSRA |= bit (ADPS0) | bit (ADPS1);                   // Set prescaler to 8
@@ -179,6 +282,55 @@ void loop()
       digitalWrite(3, LOW);
       while(analogRead(A0) > RESET_THRESHOLD){continue;}
       total_deadtime += (micros() - measurement_t1) / 1000.;}}
+}
+
+void pumpLogic() {
+  if (pump.input_array[0] == "i" || pump.input_array[0] == "r") {
+    for (int i = 1; i < numPumps+1; i++) {
+      pumpSavedInputs[i-1] = pump.input_array[i];  
+    }
+    pump_new_input = true;
+  
+    String outputString = pumpAddress + "e,";
+    for (int n = 1; n < numPumps + 1; n++) {
+      outputString += pump.input_array[n];
+      outputString += comma;
+    }
+    outputString += end_mark;
+    SerialUSB.println(outputString);
+  
+  }
+  if (pump.input_array[0] == "a" && pump_new_input) {
+    for (int i = 0; i < numPumps; i++) {
+      if (pumpSavedInputs[i] != "--") {
+        int splitIndx = pumpSavedInputs[i].indexOf("|");
+        int ippSplitIndx = pumpSavedInputs[i].indexOf("|", splitIndx+1);
+        if (splitIndx == -1) {
+          timeToPump = pumpSavedInputs[i].toFloat();
+          pumpInterval = 0;
+        }
+        else if (ippSplitIndx == -1) {
+          timeToPump = pumpSavedInputs[i].substring(0, splitIndx).toFloat();
+          pumpInterval = pumpSavedInputs[i].substring(splitIndx+1).toInt();
+        }
+        else {
+          // IPP logic not supported!
+          ipp++;
+        }
+  
+        if (pumpInterval != 0 && pumps[i].isNewChemostat(timeToPump, pumpInterval)) {
+          // unaltered chemostat
+          SerialUSB.print("Unaltered chemostat: ");
+          SerialUSB.println(i);
+        }
+        else if (ippSplitIndx == -1) {
+          pumps[i].setPump(timeToPump, pumpInterval);  
+        }
+      }
+    }
+    pump_new_input = false;
+  }
+  pump.addressFound = false;  
 }
 
 void timerIsr() 
