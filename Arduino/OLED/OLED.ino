@@ -66,17 +66,30 @@ byte keep_pulse                               = 0;
 byte SLAVE; 
 byte MASTER;
 
-// Pumps
+
+/////////////////////////////////
+///// LUMINOSTAT VARIABLES //////
+/////////////////////////////////
+int LUX_THRESHOLD = 50; // compared to ADC value
+
+float min_pump_interval = 5.; // minimum minutes between pump events, so we don't pump too often
+float time_since_pump = 0; // minutes, how long since we have last pumped
+unsigned long last_pump_time = 0; // time last we pumped
+
+
+/////////////////////////////////
+////////// PUMP CODE ////////////
+/////////////////////////////////
+// CONTAINS MANY EXTRA THINGS TO DECREASE CHANGES TO CODEBASE
 String pumpAddress = "pump";
-const int numPumps = 6;
-double timeToPump;
-int pumpInterval;
+const int numPumps = 2; // one for efflux + one for influx
+double timeToPump = 5; // seconds to run media influx pump
+int pumpInterval = 0; // used if doing chemostat (not relevant)
 int speedset[2] {0, 255};
-evolver_si pump("pump", "_!", numPumps+1);
-String pumpSavedInputs[6];
+// evolver_si pump("pump", "_!", numPumps+1);
+String pumpSavedInputs[2];
 boolean pump_new_input = false;
-int pumpOutputPin[] = {6, 7, 8, 9, 10, 12};
-byte ipp = 0;
+int pumpOutputPin[] = {4, 5}; // Digital pins 4+5 are open on the Aruino Nano
 
 class Pump {
   boolean pumpRunning = false;
@@ -122,7 +135,7 @@ class Pump {
     }
 
     void setPump(float timeToPumpSet, int pumpIntervalSet) {
-      timeToPump = timeToPumpSet * 1000;
+      timeToPump = timeToPumpSet * 1000; // convert from seconds to milli seconds
       pumpInterval = pumpIntervalSet * 1000;
 
       previousMillis = millis();
@@ -161,6 +174,10 @@ class Pump {
 };
 
 Pump pumps[numPumps];
+
+
+
+
 
 void setup() {
   // Initialize pumps
@@ -264,7 +281,7 @@ void loop()
           waiting_for_interupt = 0;}
 
       measurement_t1 = micros();
-      
+
       if (MASTER == 1) {
           analogWrite(3, LED_BRIGHTNESS);
           sipm_voltage = get_sipm_voltage(adc);
@@ -278,59 +295,27 @@ void loop()
               last_sipm_voltage = sipm_voltage; 
               Serial.println((String)count + " " + time_stamp+ " " + adc+ " " + sipm_voltage + " " + measurement_deadtime+ " " + temperatureC);}}
       
+      // LUMINOSTAT CODE
+      pumpLogic(adc);
+
       keep_pulse = 0;
       digitalWrite(3, LOW);
       while(analogRead(A0) > RESET_THRESHOLD){continue;}
       total_deadtime += (micros() - measurement_t1) / 1000.;}}
+
 }
 
-void pumpLogic() {
-  if (pump.input_array[0] == "i" || pump.input_array[0] == "r") {
-    for (int i = 1; i < numPumps+1; i++) {
-      pumpSavedInputs[i-1] = pump.input_array[i];  
-    }
-    pump_new_input = true;
+void pumpLogic(int adc_value) {
+  // turn on pumps for a given amount of time
+  time_since_pump = (time_stamp - last_pump_time) / 1000 / 60; // converting millis to minutes
+  if (time_since_pump > min_pump_interval && adc_value > LUX_THRESHOLD){
+    last_pump_time = time_stamp; // resetting
   
-    String outputString = pumpAddress + "e,";
-    for (int n = 1; n < numPumps + 1; n++) {
-      outputString += pump.input_array[n];
-      outputString += comma;
-    }
-    outputString += end_mark;
-    SerialUSB.println(outputString);
-  
+    pumps[0].setPump(timeToPump, pumpInterval); // seconds, media in
+    pumps[1].setPump(timeToPump + 5, pumpInterval); // seconds, waste out
+    
   }
-  if (pump.input_array[0] == "a" && pump_new_input) {
-    for (int i = 0; i < numPumps; i++) {
-      if (pumpSavedInputs[i] != "--") {
-        int splitIndx = pumpSavedInputs[i].indexOf("|");
-        int ippSplitIndx = pumpSavedInputs[i].indexOf("|", splitIndx+1);
-        if (splitIndx == -1) {
-          timeToPump = pumpSavedInputs[i].toFloat();
-          pumpInterval = 0;
-        }
-        else if (ippSplitIndx == -1) {
-          timeToPump = pumpSavedInputs[i].substring(0, splitIndx).toFloat();
-          pumpInterval = pumpSavedInputs[i].substring(splitIndx+1).toInt();
-        }
-        else {
-          // IPP logic not supported!
-          ipp++;
-        }
-  
-        if (pumpInterval != 0 && pumps[i].isNewChemostat(timeToPump, pumpInterval)) {
-          // unaltered chemostat
-          SerialUSB.print("Unaltered chemostat: ");
-          SerialUSB.println(i);
-        }
-        else if (ippSplitIndx == -1) {
-          pumps[i].setPump(timeToPump, pumpInterval);  
-        }
-      }
-    }
-    pump_new_input = false;
-  }
-  pump.addressFound = false;  
+
 }
 
 void timerIsr() 
