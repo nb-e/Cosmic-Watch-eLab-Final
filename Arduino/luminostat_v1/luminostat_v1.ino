@@ -14,6 +14,7 @@
   3. TimerOne             -- by Jesse Tane et al. Version 1.1.0
 */
 
+#include "MedianFilterLib.h"
 #include <Adafruit_SSD1306.h>
 #include <Adafruit_GFX.h>
 #include <TimerOne.h>
@@ -71,8 +72,12 @@ byte MASTER;
 ///// LUMINOSTAT VARIABLES //////
 /////////////////////////////////
 int LUX_THRESHOLD = 50; // compared to ADC value
+float sipm_times_averaged = 100; // number of times to read the SiPM before averaging it 
+float sipm_output = 0; // average sipm output
+// float stored_sipm_outputs[] = {0,0,0,0,0,0,0,0,0,0}// over several minutes
+// float median_sipm_output = 0; // median value of stored_sipm_oututs
 
-float min_pump_interval = 5.; // minimum minutes between pump events, so we don't pump too often
+float min_pump_interval = 5.; // minimum minutes between pump events, so we don't pump too often and overflow
 float time_since_pump = 0; // minutes, how long since we have last pumped
 unsigned long last_pump_time = 0; // time last we pumped
 
@@ -236,79 +241,53 @@ void setup() {
 void loop()
 {
   while (1){
-    if (analogRead(A0) > SIGNAL_THRESHOLD){ 
 
-      // Make a measurement of the pulse amplitude
-      int adc = analogRead(A0);
-      
-      // If Master, send a signal to the Slave
-      if (MASTER == 1) {
-          digitalWrite(6, HIGH);
-          count++;
-          keep_pulse = 1;}
+    // LUMINOSTAT CODE
+    readSiPM();
+    pumpLogic();
 
-      // Wait for ~8us
-      analogRead(A3);
-      
-      // If Slave, check for signal from Master
-      
-      if (SLAVE == 1){
-          if (digitalRead(6) == HIGH){
-              keep_pulse = 1;
-              count++;}}  
+    // Measure the temperature, voltage reference is currently set to 3.3V
+    temperatureC = (((analogRead(A3)+analogRead(A3)+analogRead(A3))/3. * (3300./1024)) - 500.)/10. ;
 
-      // Wait for ~8us
-      analogRead(A3);
+    // Measure deadtime
+    measurement_deadtime = total_deadtime;
+    time_stamp = millis() - start_time;
+    
+    
+    // If you are within 15 miliseconds away from updating the OLED screen, we'll let if finish 
+    if((interrupt_timer + 1000 - millis()) < 15){ 
+        waiting_t1 = millis();
+        waiting_for_interupt = 1;
+        delay(30);
+        waiting_for_interupt = 0;}
 
-      // If Master, stop signalling the Slave
-      if (MASTER == 1) {
-          digitalWrite(6, LOW);}
+    measurement_t1 = micros();
 
-      // Measure the temperature, voltage reference is currently set to 3.3V
-      temperatureC = (((analogRead(A3)+analogRead(A3)+analogRead(A3))/3. * (3300./1024)) - 500.)/10. ;
-
-      
-      // Measure deadtime
-      measurement_deadtime = total_deadtime;
-      time_stamp = millis() - start_time;
-      
-      
-      // If you are within 15 miliseconds away from updating the OLED screen, we'll let if finish 
-      if((interrupt_timer + 1000 - millis()) < 15){ 
-          waiting_t1 = millis();
-          waiting_for_interupt = 1;
-          delay(30);
-          waiting_for_interupt = 0;}
-
-      measurement_t1 = micros();
-
-      if (MASTER == 1) {
-          analogWrite(3, LED_BRIGHTNESS);
-          sipm_voltage = get_sipm_voltage(adc);
-          last_sipm_voltage = sipm_voltage; 
-          Serial.println((String)count + " " + time_stamp+ " " + adc+ " " + sipm_voltage+ " " + measurement_deadtime+ " " + temperatureC);}
-  
-      if (SLAVE == 1) {
-          if (keep_pulse == 1) {   
-              analogWrite(3, LED_BRIGHTNESS);
-              sipm_voltage = get_sipm_voltage(adc);
-              last_sipm_voltage = sipm_voltage; 
-              Serial.println((String)count + " " + time_stamp+ " " + adc+ " " + sipm_voltage + " " + measurement_deadtime+ " " + temperatureC);}}
-      
-      // LUMINOSTAT CODE
-      pumpLogic(adc);
-
-      keep_pulse = 0;
-      digitalWrite(3, LOW);
-      while(analogRead(A0) > RESET_THRESHOLD){continue;}
-      total_deadtime += (micros() - measurement_t1) / 1000.;}}
+    sipm_voltage = get_sipm_voltage(sipm_output);
+    last_sipm_voltage = sipm_voltage; 
+    Serial.println((String)sipm_output + " " + analogRead(A0)+ " " + sipm_voltage+ " " + time_stamp+ " " + temperatureC);
+    delay(10);
+    total_deadtime += (micros() - measurement_t1) / 1000.;
+    
+  }
 
 }
 
-void pumpLogic(int adc_value) {
+void readSiPM() {
+  // read the SiPM a number of times and average the result
+  unsigned long total = 0;
+  for (int i=0; i < sipm_times_averaged; i++) {
+    total += analogRead(A0); // collect readings
+  }
+
+  sipm_output = total / sipm_times_averaged; // average the SiPM readings
+  // Serial.println("Measurement DONE");
+}
+
+void pumpLogic() {
   // turn on pumps for a given amount of time
   time_since_pump = (time_stamp - last_pump_time) / 1000 / 60; // converting millis to minutes
-  if (time_since_pump > min_pump_interval && adc_value > LUX_THRESHOLD){
+  if (time_since_pump > min_pump_interval && sipm_output > LUX_THRESHOLD){
     last_pump_time = time_stamp; // resetting
   
     pumps[0].setPump(timeToPump, pumpInterval); // seconds, media in
@@ -333,20 +312,9 @@ void get_time()
 {
   // function that prints to the OLED display
   unsigned long int OLED_t1             = micros();
-  float count_average                   = 0;
-  float count_std                       = 0;
-
-  if (count > 0.) {
-      count_average   = count / ((interrupt_timer - start_time - total_deadtime) / 1000.);
-      count_std       = sqrt(count) / ((interrupt_timer - start_time - total_deadtime) / 1000.);}
-  else {
-      count_average   = 0;
-      count_std       = 0;}
   
   display.setCursor(0, 0);
   display.clearDisplay();
-  display.print(F("Total Count: "));
-  display.println(count);
   display.print(F("Uptime: "));
 
   int minutes                 = ((interrupt_timer - start_time) / 1000 / 60) % 60;
@@ -359,37 +327,25 @@ void get_time()
 
   display.println((String) ((interrupt_timer - start_time) / 1000 / 3600) + ":" + min_char + ":" + sec_char);
 
-  if (count == 0) {
-    display.println("Hi, I'm "+(String)detector_name);
-    }
-      //if (MASTER == 1) {display.println(F("::---  MASTER   ---::"));}
-      //if (SLAVE  == 1) {display.println(F("::---   SLAVE   ---::"));}}
-      
-  else{
-    display.print(F("SiPM Voltage: "));    
-    display.print((String)(sipm_voltage));
-    display.print(F("V"));
-    // if (last_sipm_voltage > 180){
-    //     display.print(F("===---- WOW! ----==="));}
-    // else{
-    //       if (MASTER == 1) {display.print(F("M"));}
-    //       if (SLAVE  == 1) {display.print(F("S"));}
-    //       for (int i = 1; i <=  (last_sipm_voltage + 10) / 10; i++) {display.print(F("-"));}}
-  display.println(F(""));}
+  display.print(F("ADC: "));    
+  display.print((String)(sipm_output));
+  display.print(F(" | "));    
+  display.print((String)(temperatureC));
+  display.println(F("C"));
 
-  char tmp_average[4];
-  char tmp_std[4];
+  // char tmp_average[4];
+  // char tmp_std[4];
 
-  int decimals = 2;
-  if (count_average < 10) {decimals = 3;}
+  // int decimals = 2;
+  // if (count_average < 10) {decimals = 3;}
   
-  dtostrf(count_average, 1, decimals, tmp_average);
-  dtostrf(count_std, 1, decimals, tmp_std);
+  // dtostrf(count_average, 1, decimals, tmp_average);
+  // dtostrf(count_std, 1, decimals, tmp_std);
    
-  display.print(F("Rate: "));
-  display.print((String)tmp_average);
-  display.print(F("+/-"));
-  display.println((String)tmp_std);
+  // display.print(F("Rate: "));
+  // display.print((String)tmp_average);
+  // display.print(F("+/-"));
+  // display.println((String)tmp_std);
   display.display();
   
   total_deadtime                      += (micros() - OLED_t1 +73)/1000.;
